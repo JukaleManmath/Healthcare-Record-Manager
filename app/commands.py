@@ -1,4 +1,5 @@
 import click
+import os
 from flask.cli import with_appcontext
 from app import db
 from app.models import User, Patient, Record
@@ -70,7 +71,7 @@ def seed_data():
             {
                 'username': 'dr_smith',
                 'email': 'dr.smith@healthcare.com',
-                'password': 'password123',
+                'password': os.getenv('SEED_DOCTOR_PASSWORD', 'seed-doctor-pass'),
                 'first_name': 'John',
                 'last_name': 'Smith',
                 'role': 'doctor'
@@ -78,7 +79,7 @@ def seed_data():
             {
                 'username': 'dr_johnson',
                 'email': 'dr.johnson@healthcare.com',
-                'password': 'password123',
+                'password': os.getenv('SEED_DOCTOR_PASSWORD', 'seed-doctor-pass'),
                 'first_name': 'Sarah',
                 'last_name': 'Johnson',
                 'role': 'doctor'
@@ -86,7 +87,7 @@ def seed_data():
             {
                 'username': 'nurse_wilson',
                 'email': 'nurse.wilson@healthcare.com',
-                'password': 'password123',
+                'password': os.getenv('SEED_NURSE_PASSWORD', 'seed-nurse-pass'),
                 'first_name': 'Michael',
                 'last_name': 'Wilson',
                 'role': 'nurse'
@@ -94,7 +95,7 @@ def seed_data():
             {
                 'username': 'patient_doe',
                 'email': 'john.doe@email.com',
-                'password': 'password123',
+                'password': os.getenv('SEED_PATIENT_PASSWORD', 'seed-patient-pass'),
                 'first_name': 'John',
                 'last_name': 'Doe',
                 'role': 'patient'

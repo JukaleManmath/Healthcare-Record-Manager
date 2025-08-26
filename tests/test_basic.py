@@ -1,4 +1,5 @@
 import pytest
+import os
 from app import create_app, db
 from app.models import User, Patient, Record
 from app.utils.encryption import encrypt_data, decrypt_data
@@ -44,7 +45,7 @@ def test_user_creation(app):
         user = User(
             username='testuser',
             email='test@example.com',
-            password='password123',
+            password=os.getenv('TEST_USER_PASSWORD', 'test-user-pass'),
             first_name='Test',
             last_name='User',
             role='doctor'
@@ -53,7 +54,7 @@ def test_user_creation(app):
         db.session.commit()
         
         assert user.id is not None
-        assert user.check_password('password123')
+        assert user.check_password(os.getenv('TEST_USER_PASSWORD', 'test-user-pass'))
         assert user.has_role('doctor')
 
 def test_patient_creation(app):
@@ -83,7 +84,7 @@ def test_record_creation(app):
         user = User(
             username='doctor',
             email='doctor@example.com',
-            password='password123',
+            password=os.getenv('TEST_DOCTOR_PASSWORD', 'test-doctor-pass'),
             first_name='Dr',
             last_name='Smith',
             role='doctor'

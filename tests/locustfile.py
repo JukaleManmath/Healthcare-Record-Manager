@@ -1,6 +1,7 @@
 from locust import HttpUser, task, between
 import json
 import random
+import os
 
 class HealthcareUser(HttpUser):
     wait_time = between(1, 3)
@@ -12,11 +13,11 @@ class HealthcareUser(HttpUser):
     def login(self):
         """Login with different user roles"""
         users = [
-            {"username": "admin@healthcare.com", "password": "admin123"},
-            {"username": "doctor@healthcare.com", "password": "doctor123"},
-            {"username": "nurse@healthcare.com", "password": "nurse123"},
-            {"username": "clerk@healthcare.com", "password": "clerk123"},
-            {"username": "patient@healthcare.com", "password": "patient123"}
+            {"username": "admin@healthcare.com", "password": os.getenv('TEST_ADMIN_PASSWORD', 'test-admin-pass')},
+            {"username": "doctor@healthcare.com", "password": os.getenv('TEST_DOCTOR_PASSWORD', 'test-doctor-pass')},
+            {"username": "nurse@healthcare.com", "password": os.getenv('TEST_NURSE_PASSWORD', 'test-nurse-pass')},
+            {"username": "clerk@healthcare.com", "password": os.getenv('TEST_CLERK_PASSWORD', 'test-clerk-pass')},
+            {"username": "patient@healthcare.com", "password": os.getenv('TEST_PATIENT_PASSWORD', 'test-patient-pass')}
         ]
         
         user = random.choice(users)
