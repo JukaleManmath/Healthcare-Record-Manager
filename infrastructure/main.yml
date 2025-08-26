@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Healthcare Platform - Master Infrastructure Template'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Environment name
+  
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+  
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium, db.r5.large, db.r5.xlarge]
+    Description: RDS instance class
+  
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password
+    MinLength: 8
+  
+  ECRRepositoryUri:
+    Type: String
+    Description: ECR repository URI for the application image
+  
+  ECRImageTag:
+    Type: String
+    Default: latest
+    Description: ECR image tag to deploy
+  
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: Desired number of ECS tasks
+
+Resources:
+  # Network Stack
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: network.yml
+      Parameters:
+        Environment: !Ref Environment
+        VpcCidr: !Ref VpcCidr
+
+  # Database Stack
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: rds.yml
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PrivateSubnet1Id: !GetAtt NetworkStack.Outputs.PrivateSubnet1Id
+        PrivateSubnet2Id: !GetAtt NetworkStack.Outputs.PrivateSubnet2Id
+        DatabaseSecurityGroupId: !GetAtt NetworkStack.Outputs.DatabaseSecurityGroupId
+        DatabaseInstanceClass: !Ref DatabaseInstanceClass
+        DatabasePassword: !Ref DatabasePassword
+
+  # ElastiCache Stack
+  ElastiCacheStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: elasticache.yml
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PrivateSubnet1Id: !GetAtt NetworkStack.Outputs.PrivateSubnet1Id
+        PrivateSubnet2Id: !GetAtt NetworkStack.Outputs.PrivateSubnet2Id
+        RedisSecurityGroupId: !GetAtt NetworkStack.Outputs.RedisSecurityGroupId
+
+  # Application Stack
+  ApplicationStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [DatabaseStack, ElastiCacheStack]
+    Properties:
+      TemplateURL: ecs.yml
+      Parameters:
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnet1Id: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        PublicSubnet2Id: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+        PrivateSubnet1Id: !GetAtt NetworkStack.Outputs.PrivateSubnet1Id
+        PrivateSubnet2Id: !GetAtt NetworkStack.Outputs.PrivateSubnet2Id
+        ALBSecurityGroupId: !GetAtt NetworkStack.Outputs.ALBSecurityGroupId
+        ECSSecurityGroupId: !GetAtt NetworkStack.Outputs.ECSSecurityGroupId
+        DatabaseEndpoint: !GetAtt DatabaseStack.Outputs.DatabaseEndpoint
+        DatabaseName: !GetAtt DatabaseStack.Outputs.DatabaseName
+        RedisEndpoint: !GetAtt ElastiCacheStack.Outputs.RedisEndpoint
+        ECRRepositoryUri: !Ref ECRRepositoryUri
+        ECRImageTag: !Ref ECRImageTag
+        DesiredCount: !Ref DesiredCount
+
+Outputs:
+  # Network Outputs
+  VpcId:
+    Description: VPC ID
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+    Export:
+      Name: !Sub '${Environment}-healthcare-vpc-id'
+
+  # Database Outputs
+  DatabaseEndpoint:
+    Description: Database endpoint
+    Value: !GetAtt DatabaseStack.Outputs.DatabaseEndpoint
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-endpoint'
+
+  # Redis Outputs
+  RedisEndpoint:
+    Description: Redis endpoint
+    Value: !GetAtt ElastiCacheStack.Outputs.RedisEndpoint
+    Export:
+      Name: !Sub '${Environment}-healthcare-redis-endpoint'
+
+  # Application Outputs
+  ALBDNSName:
+    Description: Application Load Balancer DNS name
+    Value: !GetAtt ApplicationStack.Outputs.ALBDNSName
+    Export:
+      Name: !Sub '${Environment}-healthcare-alb-dns'
+
+  ECSClusterName:
+    Description: ECS cluster name
+    Value: !GetAtt ApplicationStack.Outputs.ECSClusterName
+    Export:
+      Name: !Sub '${Environment}-healthcare-ecs-cluster-name'
+
+  ECRRepositoryUri:
+    Description: ECR repository URI
+    Value: !GetAtt ApplicationStack.Outputs.ECRRepositoryUri
+    Export:
+      Name: !Sub '${Environment}-healthcare-ecr-repository-uri'

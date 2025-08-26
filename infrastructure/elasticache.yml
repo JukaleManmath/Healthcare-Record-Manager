@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Healthcare Platform - ElastiCache Redis Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Environment name
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID from network stack
+  
+  PrivateSubnet1Id:
+    Type: String
+    Description: Private Subnet 1 ID from network stack
+  
+  PrivateSubnet2Id:
+    Type: String
+    Description: Private Subnet 2 ID from network stack
+  
+  RedisSecurityGroupId:
+    Type: String
+    Description: Redis Security Group ID from network stack
+  
+  RedisNodeType:
+    Type: String
+    Default: cache.t3.micro
+    AllowedValues: [cache.t3.micro, cache.t3.small, cache.t3.medium, cache.r5.large, cache.r5.xlarge]
+    Description: ElastiCache node type
+  
+  RedisNumCacheNodes:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 20
+    Description: Number of cache nodes
+
+Resources:
+  # Redis Subnet Group
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group for healthcare Redis cluster
+      SubnetIds:
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-redis-subnet-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Redis Parameter Group
+  RedisParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: Parameter group for healthcare Redis
+      Family: redis7
+      Properties:
+        maxmemory-policy: allkeys-lru
+        timeout: 300
+        tcp-keepalive: 300
+        save: '900 1 300 10 60 10000'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-redis-parameter-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Redis Cluster
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheClusterId: !Sub '${Environment}-healthcare-redis'
+      Engine: redis
+      EngineVersion: 7.0
+      CacheNodeType: !Ref RedisNodeType
+      NumCacheNodes: !Ref RedisNumCacheNodes
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      CacheParameterGroupName: !Ref RedisParameterGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSecurityGroupId
+      Port: 6379
+      PreferredMaintenanceWindow: sun:05:00-sun:09:00
+      SnapshotRetentionLimit: !If [IsProduction, 7, 1]
+      SnapshotWindow: 03:00-05:00
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-redis'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Alarms
+  RedisCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-redis-cpu-alarm'
+      AlarmDescription: Redis CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Ref RedisCluster
+      AlarmActions:
+        - !Ref RedisAlarmTopic
+
+  RedisMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-redis-memory-alarm'
+      AlarmDescription: Redis memory utilization is high
+      MetricName: DatabaseMemoryUsagePercentage
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Ref RedisCluster
+      AlarmActions:
+        - !Ref RedisAlarmTopic
+
+  RedisConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-redis-connections-alarm'
+      AlarmDescription: Redis connection count is high
+      MetricName: CurrConnections
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Ref RedisCluster
+      AlarmActions:
+        - !Ref RedisAlarmTopic
+
+  # SNS Topic for Redis Alarms
+  RedisAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-healthcare-redis-alarms'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-redis-alarms'
+        - Key: Environment
+          Value: !Ref Environment
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Outputs:
+  RedisEndpoint:
+    Description: Redis endpoint
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address
+    Export:
+      Name: !Sub '${Environment}-healthcare-redis-endpoint'
+
+  RedisPort:
+    Description: Redis port
+    Value: !GetAtt RedisCluster.RedisEndpoint.Port
+    Export:
+      Name: !Sub '${Environment}-healthcare-redis-port'
+
+  RedisSubnetGroupName:
+    Description: Redis subnet group name
+    Value: !Ref RedisSubnetGroup
+    Export:
+      Name: !Sub '${Environment}-healthcare-redis-subnet-group-name'

@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Healthcare Platform - RDS Database Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Environment name
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID from network stack
+  
+  PrivateSubnet1Id:
+    Type: String
+    Description: Private Subnet 1 ID from network stack
+  
+  PrivateSubnet2Id:
+    Type: String
+    Description: Private Subnet 2 ID from network stack
+  
+  DatabaseSecurityGroupId:
+    Type: String
+    Description: Database Security Group ID from network stack
+  
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium, db.r5.large, db.r5.xlarge]
+    Description: RDS instance class
+  
+  DatabaseAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 65536
+    Description: Allocated storage in GB
+  
+  DatabaseName:
+    Type: String
+    Default: healthcare_db
+    Description: Database name
+  
+  DatabaseUsername:
+    Type: String
+    Default: admin
+    Description: Database master username
+  
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password
+    MinLength: 8
+
+Resources:
+  # KMS Key for RDS Encryption
+  RDSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow RDS to use the key
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-rds-kms-key'
+        - Key: Environment
+          Value: !Ref Environment
+
+  RDSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${Environment}-healthcare-rds'
+      TargetKeyId: !Ref RDSKMSKey
+
+  # Database Subnet Group
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for healthcare database
+      SubnetIds:
+        - !Ref PrivateSubnet1Id
+        - !Ref PrivateSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db-subnet-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Parameter Group for PostgreSQL
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Parameter group for healthcare database
+      Family: postgres15
+      Parameters:
+        shared_preload_libraries: 'pg_stat_statements'
+        log_statement: 'all'
+        log_min_duration_statement: '1000'
+        log_connections: 'on'
+        log_disconnections: 'on'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db-parameter-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Option Group for PostgreSQL
+  DatabaseOptionGroup:
+    Type: AWS::RDS::OptionGroup
+    Properties:
+      EngineName: postgres
+      MajorEngineVersion: '15.4'
+      OptionGroupDescription: Option group for healthcare database
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db-option-group'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # RDS Instance
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${Environment}-healthcare-db'
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      Engine: postgres
+      EngineVersion: '15.4'
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      StorageType: gp2
+      StorageEncrypted: true
+      KmsKeyId: !Ref RDSKMSKey
+      MasterUsername: !Ref DatabaseUsername
+      MasterUserPassword: !Ref DatabasePassword
+      DBName: !Ref DatabaseName
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroupId
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      OptionGroupName: !Ref DatabaseOptionGroup
+      BackupRetentionPeriod: !If [IsProduction, 7, 1]
+      MultiAZ: !If [IsProduction, true, false]
+      PubliclyAccessible: false
+      DeletionProtection: !If [IsProduction, true, false]
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: !If [IsProduction, 7, 1]
+      MonitoringInterval: 60
+      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for RDS Monitoring
+  RDSMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-healthcare-rds-monitoring-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-rds-monitoring-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Alarms
+  DatabaseCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-db-cpu-alarm'
+      AlarmDescription: Database CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+
+  DatabaseConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-db-connections-alarm'
+      AlarmDescription: Database connection count is high
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+
+  DatabaseFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-db-storage-alarm'
+      AlarmDescription: Database free storage space is low
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1000000000
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      AlarmActions:
+        - !Ref DatabaseAlarmTopic
+
+  # SNS Topic for Database Alarms
+  DatabaseAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-healthcare-db-alarms'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db-alarms'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Group
+  DatabaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/rds/instance/${Environment}-healthcare-db'
+      RetentionInDays: !If [IsProduction, 30, 7]
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-db-logs'
+        - Key: Environment
+          Value: !Ref Environment
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Outputs:
+  DatabaseEndpoint:
+    Description: Database endpoint
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-endpoint'
+
+  DatabasePort:
+    Description: Database port
+    Value: !GetAtt Database.Endpoint.Port
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-port'
+
+  DatabaseName:
+    Description: Database name
+    Value: !Ref DatabaseName
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-name'
+
+  DatabaseSubnetGroupName:
+    Description: Database subnet group name
+    Value: !Ref DatabaseSubnetGroup
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-subnet-group-name'
+
+  DatabaseKMSKeyId:
+    Description: Database KMS key ID
+    Value: !Ref RDSKMSKey
+    Export:
+      Name: !Sub '${Environment}-healthcare-db-kms-key-id'

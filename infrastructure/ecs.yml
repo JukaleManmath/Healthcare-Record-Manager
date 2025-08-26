@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Healthcare Platform - ECS Application Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Environment name
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID from network stack
+  
+  PublicSubnet1Id:
+    Type: String
+    Description: Public Subnet 1 ID from network stack
+  
+  PublicSubnet2Id:
+    Type: String
+    Description: Public Subnet 2 ID from network stack
+  
+  PrivateSubnet1Id:
+    Type: String
+    Description: Private Subnet 1 ID from network stack
+  
+  PrivateSubnet2Id:
+    Type: String
+    Description: Private Subnet 2 ID from network stack
+  
+  ALBSecurityGroupId:
+    Type: String
+    Description: ALB Security Group ID from network stack
+  
+  ECSSecurityGroupId:
+    Type: String
+    Description: ECS Security Group ID from network stack
+  
+  DatabaseEndpoint:
+    Type: String
+    Description: Database endpoint from RDS stack
+  
+  DatabaseName:
+    Type: String
+    Description: Database name from RDS stack
+  
+  RedisEndpoint:
+    Type: String
+    Description: Redis endpoint from ElastiCache stack
+  
+  ECRRepositoryUri:
+    Type: String
+    Description: ECR repository URI for the application image
+  
+  ECRImageTag:
+    Type: String
+    Default: latest
+    Description: ECR image tag to deploy
+  
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: Desired number of tasks
+  
+  MaxCount:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 20
+    Description: Maximum number of tasks for auto scaling
+  
+  TaskCpu:
+    Type: String
+    Default: 256
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+    Description: CPU units for the task
+  
+  TaskMemory:
+    Type: String
+    Default: 512
+    AllowedValues: [512, 1024, 2048, 4096, 8192, 16384]
+    Description: Memory in MiB for the task
+
+Resources:
+  # ECR Repository (if not exists)
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: healthcare-platform
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-ecr'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${Environment}-healthcare-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Settings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-cluster'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Task Definition
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Environment}-healthcare-task'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: healthcare-app
+          Image: !Sub '${ECRRepositoryUri}:${ECRImageTag}'
+          PortMappings:
+            - ContainerPort: 5000
+              Protocol: tcp
+          Environment:
+            - Name: FLASK_ENV
+              Value: !Ref Environment
+            - Name: DATABASE_URL
+              Value: !Sub 'postgresql://admin:${DatabasePassword}@${DatabaseEndpoint}:5432/${DatabaseName}'
+            - Name: REDIS_URL
+              Value: !Sub 'redis://${RedisEndpoint}:6379/0'
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          Secrets:
+            - Name: SECRET_KEY
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:healthcare/${Environment}/app-secret:secret_key::'
+            - Name: JWT_SECRET_KEY
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:healthcare/${Environment}/app-secret:jwt_secret_key::'
+            - Name: ENCRYPTION_KEY
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:healthcare/${Environment}/app-secret:encryption_key::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ApplicationLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:5000/api/health/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          Essential: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-task'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for ECS Task Execution
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-healthcare-ecs-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:healthcare/${Environment}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-ecs-execution-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for ECS Task
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-healthcare-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:aws:s3:::${Environment}-healthcare-records-${AWS::AccountId}/*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ApplicationLogGroup.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-ecs-task-role'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${Environment}-healthcare-alb'
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroupId
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-alb'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${Environment}-healthcare-tg'
+      Port: 5000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /api/health/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-tg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub '${Environment}-healthcare-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroupId
+          Subnets:
+            - !Ref PrivateSubnet1Id
+            - !Ref PrivateSubnet2Id
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: healthcare-app
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ALBTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-service'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Auto Scaling Target
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxCount
+      MinCapacity: !Ref DesiredCount
+      ResourceId: !Sub 'service/${ECSCluster.Name}/${ECSService.Name}'
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # CPU-based Auto Scaling Policy
+  CPUScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${Environment}-healthcare-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalableTarget: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 300
+
+  # Memory-based Auto Scaling Policy
+  MemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${Environment}-healthcare-memory-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalableTarget: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 300
+
+  # CloudWatch Log Group
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${Environment}-healthcare'
+      RetentionInDays: !If [IsProduction, 30, 7]
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-app-logs'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Alarms
+  ServiceCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-service-cpu-alarm'
+      AlarmDescription: ECS service CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !GetAtt ECSCluster.Name
+      AlarmActions:
+        - !Ref ServiceAlarmTopic
+
+  ServiceMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-healthcare-service-memory-alarm'
+      AlarmDescription: ECS service memory utilization is high
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt ECSService.Name
+        - Name: ClusterName
+          Value: !GetAtt ECSCluster.Name
+      AlarmActions:
+        - !Ref ServiceAlarmTopic
+
+  # SNS Topic for Service Alarms
+  ServiceAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-healthcare-service-alarms'
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-healthcare-service-alarms'
+        - Key: Environment
+          Value: !Ref Environment
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Outputs:
+  ECSClusterName:
+    Description: ECS cluster name
+    Value: !GetAtt ECSCluster.Name
+    Export:
+      Name: !Sub '${Environment}-healthcare-ecs-cluster-name'
+
+  ECSServiceName:
+    Description: ECS service name
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub '${Environment}-healthcare-ecs-service-name'
+
+  ALBDNSName:
+    Description: Application Load Balancer DNS name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${Environment}-healthcare-alb-dns'
+
+  ALBListenerArn:
+    Description: ALB listener ARN
+    Value: !Ref ALBListener
+    Export:
+      Name: !Sub '${Environment}-healthcare-alb-listener-arn'
+
+  ECRRepositoryUri:
+    Description: ECR repository URI
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}'
+    Export:
+      Name: !Sub '${Environment}-healthcare-ecr-repository-uri'

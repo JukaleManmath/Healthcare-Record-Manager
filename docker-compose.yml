@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_APP=app
+      - FLASK_ENV=development
+      - DATABASE_URL=postgresql://healthcare_user:healthcare_pass@db:5432/healthcare_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production
+      - ENCRYPTION_KEY=your-32-byte-encryption-key-here
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    networks:
+      - healthcare-network
+
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=healthcare_db
+      - POSTGRES_USER=healthcare_user
+      - POSTGRES_PASSWORD=healthcare_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - healthcare-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - healthcare-network
+
+  celery:
+    build: .
+    command: celery -A app.celery worker --loglevel=info
+    environment:
+      - FLASK_APP=app
+      - DATABASE_URL=postgresql://healthcare_user:healthcare_pass@db:5432/healthcare_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production
+      - ENCRYPTION_KEY=your-32-byte-encryption-key-here
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    networks:
+      - healthcare-network
+
+  celery-beat:
+    build: .
+    command: celery -A app.celery beat --loglevel=info
+    environment:
+      - FLASK_APP=app
+      - DATABASE_URL=postgresql://healthcare_user:healthcare_pass@db:5432/healthcare_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production
+      - ENCRYPTION_KEY=your-32-byte-encryption-key-here
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    networks:
+      - healthcare-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  healthcare-network:
+    driver: bridge
